@@ -1,6 +1,8 @@
 import csv
 import logging
 import asyncio
+import urllib.parse
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from apify_client import ApifyClient
@@ -10,9 +12,10 @@ from email_extractor import extract_contact_info
 # Configure Logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s | %(levelname)-7s | %(message)s',
+    datefmt='%H:%M:%S'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Outreach")
 
 # Constants
 CREDENTIALS_FILE = "credentials.json"
@@ -25,15 +28,48 @@ BATCH_SIZE = 5
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
-# Thread pool for blocking Apify / gspread calls
-_thread_pool = ThreadPoolExecutor(max_workers=CONCURRENCY)
+# Thread pool for blocking Apify / gspread / CSV calls
+_thread_pool = ThreadPoolExecutor(max_workers=CONCURRENCY + 1)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _remove_url_from_csv_sync(url_to_remove: str):
+    """Surgically remove a URL from the CSV file."""
+    rows = []
+    header = None
+    try:
+        with open(COMPANY_URL_FILE, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for row in reader:
+                if row and row[0].strip() != url_to_remove:
+                    rows.append(row)
+        
+        with open(COMPANY_URL_FILE, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            if header: writer.writerow(header)
+            writer.writerows(rows)
+    except Exception as e:
+        logger.error(f"[CSV] Failed to remove {url_to_remove}: {e}")
+
+
 def normalize_url(url: str) -> str:
-    """Normalize a URL for duplicate comparison (strip trailing slash, lowercase)."""
-    return url.strip().rstrip('/').lower()
+    """Normalize a LinkedIn URL for robust duplicate comparison."""
+    if not url:
+        return ""
+    u = url.strip().lower()
+    # Decode URL-encoded characters (e.g., %20, %CF%83)
+    u = urllib.parse.unquote(u)
+    # Remove protocol
+    u = re.sub(r'^https?://', '', u)
+    # Remove subdomains (e.g. www., in., sg.)
+    u = re.sub(r'^([^/]+\.)?linkedin\.com', 'linkedin.com', u)
+    # Remove query parameters and fragments
+    u = u.split('?')[0].split('#')[0]
+    # Remove trailing slashes
+    u = u.rstrip('/')
+    return u
 
 
 def normalize_website_url(url: str) -> str:
@@ -71,7 +107,7 @@ def _fetch_company_details_sync(api_key: str, company_urls: list[str]) -> list[d
 
 async def extract_company_details(loop, api_key: str, company_urls: list[str]) -> list[dict]:
     """Async wrapper: runs blocking batched Apify call off the event loop."""
-    logger.info(f"[Apify] Fetching batch of {len(company_urls)} URLs: {company_urls}")
+    logger.info(f"[Apify] Fetching {len(company_urls)} URLs...")
     try:
         results = await loop.run_in_executor(
             _thread_pool,
@@ -83,9 +119,9 @@ async def extract_company_details(loop, api_key: str, company_urls: list[str]) -
     except Exception as e:
         msg = str(e).lower()
         if "free user run limit reached" in msg or "quota" in msg or "limit" in msg:
-            logger.warning(f"[Apify] Key limit reached for {api_key[:10]}...")
+            logger.warning(f"[Apify] Key limit reached ({api_key[:8]}...)")
             raise RuntimeError("APIFY_LIMIT_REACHED")
-        logger.error(f"[Apify] Error for batch {company_urls}: {e}")
+        logger.error(f"[Apify] Error for batch: {e}")
         return []
 
 
@@ -94,27 +130,27 @@ async def extract_company_details(loop, api_key: str, company_urls: list[str]) -
 async def extract_emails_and_phones(website_url: str) -> tuple[list, list]:
     """Crawl company website for emails and phone numbers."""
     if not website_url:
-        logger.warning("No website URL — skipping contact extraction.")
         return [], []
 
     website_url = normalize_website_url(website_url)
-    logger.info(f"[Web] Crawling: {website_url}")
+    display_url = website_url.replace("https://", "").replace("http://", "").split('/')[0]
+    logger.info(f"[Web] Crawling: {display_url}")
 
     try:
         emails, phones = await extract_contact_info(website_url)
-        logger.info(f"  → {len(emails)} email(s): {emails}")
-        logger.info(f"  → {len(phones)} phone(s): {phones}")
+        if emails or phones:
+            logger.info(f"  → Found {len(emails)} email(s), {len(phones)} phone(s)")
 
         # Fallback: try http:// if https:// returns nothing
         if not emails and not phones and website_url.startswith("https://"):
             fallback = "http://" + website_url[len("https://"):]
-            logger.info(f"  Retrying with: {fallback}")
             emails, phones = await extract_contact_info(fallback)
-            logger.info(f"  Fallback → {len(emails)} email(s), {len(phones)} phone(s)")
+            if emails or phones:
+                logger.info(f"  → Fallback found {len(emails)} email(s), {len(phones)} phone(s)")
 
         return emails, phones
     except Exception as ex:
-        logger.warning(f"[Web] Could not extract from {website_url}: {ex}", exc_info=True)
+        logger.debug(f"[Web] Extraction failed for {website_url}: {ex}")
         return [], []
 
 
@@ -141,7 +177,7 @@ def format_company_data(company_data: dict, emails: list, phones: list) -> list:
     location = ", ".join(parts)
 
     description = company_data.get("description", "")
-    scraped_at  = datetime.now().isoformat()
+    scraped_at  = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     return [
         name, website, linkedin, industry, company_size,
@@ -158,6 +194,8 @@ def format_company_data(company_data: dict, emails: list, phones: list) -> list:
 # ── Per-URL worker ───────────────────────────────────────────────────────────
 
 async def process_url_batch(
+    batch_idx: int,
+    total_batches: int,
     url_batch: list[str],
     apify_keys: list[str],
     key_index_ref: list[int],
@@ -165,16 +203,21 @@ async def process_url_batch(
     sheets_manager: SheetsManager,
     semaphore: asyncio.Semaphore,
     sheet_lock: asyncio.Lock,
+    csv_lock: asyncio.Lock,
     loop,
 ):
     """Process a batch of URLs (up to 5): Apify → email extract → sheet append."""
     async with semaphore:
-        logger.info(f"\n{'─'*50}\n[Batch Worker] Processing batch of {len(url_batch)} URLs: {url_batch[:2]}...")
+        prefix = f"[Batch {batch_idx}/{total_batches}]"
+        logger.info(f"{prefix} Processing {len(url_batch)} URLs...")
+        
+        # Mapping to match Apify results back to original CSV strings
+        url_map = {normalize_url(u): u for u in url_batch}
         
         for attempt in range(MAX_RETRIES):
             key_index = key_index_ref[0]
             if key_index >= len(apify_keys):
-                logger.error(f"[Batch Worker] All Apify keys exhausted. Batch failed.")
+                logger.error(f"{prefix} All Apify keys exhausted.")
                 return
             
             current_key = apify_keys[key_index]
@@ -184,76 +227,62 @@ async def process_url_batch(
                 company_details_list = await extract_company_details(loop, current_key, url_batch)
 
                 if not company_details_list:
-                    logger.warning(f"[Batch Worker] No Apify data for batch (attempt {attempt + 1}). Retrying...")
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(RETRY_DELAY * (2 ** attempt))  # Exponential backoff
+                        logger.warning(f"{prefix} No data, retrying ({attempt + 1})...")
+                        await asyncio.sleep(RETRY_DELAY * (2 ** attempt))
                         continue
                     else:
-                        logger.warning(f"[Batch Worker] Failed after {MAX_RETRIES} attempts. Skipping batch.")
+                        logger.warning(f"{prefix} Failed after {MAX_RETRIES} attempts.")
                         return
-
-                logger.info(f"[Batch Worker] Got {len(company_details_list)} result(s) from Apify (attempt {attempt + 1})")
 
                 # ── B. Process each result ─────────────────────────
                 processed_count = 0
-                skipped_count = 0
                 
                 for company_details in company_details_list:
-                    # Get LinkedIn URL from Apify response
                     apify_linkedin = company_details.get("url", "").strip()
-                    
-                    if not apify_linkedin:
-                        logger.debug("[Batch Worker] No LinkedIn URL in response, skipping.")
-                        continue
+                    if not apify_linkedin: continue
                     
                     apify_linkedin_normalized = normalize_url(apify_linkedin)
                     
                     async with sheet_lock:
-                        # Check if already exists in sheet
                         if apify_linkedin_normalized in existing_linkedin_urls:
-                            logger.info(f"[Batch Worker] DUPLICATE (LinkedIn): {apify_linkedin} — skipping.")
-                            skipped_count += 1
                             continue
 
-                        # Add to existing set to prevent duplicates within this batch
                         existing_linkedin_urls.add(apify_linkedin_normalized)
-
-                        # Email / phone extraction
                         website_url = company_details.get("websiteUrl", "")
                         emails, phones = await extract_emails_and_phones(website_url)
 
-                        # Format & append
                         row = format_company_data(company_details, emails, phones)
                         await loop.run_in_executor(
                             _thread_pool,
                             lambda r=row: sheets_manager.append_company_data(OUTREACH_SHEET_URL, r)
                         )
+                        logger.info(f"{prefix} ✓ Saved: {row[0][:30]}...")
 
-                        logger.info(f"[Batch Worker] ✓ Appended: {row[0]} | LinkedIn: {apify_linkedin}")
+                        # ── C. Immediately remove from CSV ──────────
+                        original_url = url_map.get(apify_linkedin_normalized)
+                        if original_url:
+                            async with csv_lock:
+                                await loop.run_in_executor(_thread_pool, _remove_url_from_csv_sync, original_url)
+
                         processed_count += 1
 
-                logger.info(f"[Batch Worker] Batch complete: {processed_count} added, {skipped_count} duplicates")
+                logger.info(f"{prefix} Done. {processed_count} added.")
                 return
 
             except RuntimeError as e:
                 if str(e) == "APIFY_LIMIT_REACHED":
-                    logger.warning(f"[Batch Worker] Rate limit hit (attempt {attempt + 1}/{MAX_RETRIES}). Backing off...")
-                    
-                    # Only rotate key if we have multiple keys
+                    logger.warning(f"{prefix} Rate limit hit, rotating key...")
                     if len(apify_keys) > 1 and attempt < MAX_RETRIES - 1:
                         async with sheet_lock:
                             if key_index_ref[0] == key_index:
                                 key_index_ref[0] += 1
-                        logger.warning(f"[Batch Worker] Rotated to key index {key_index_ref[0]}")
-                    
-                    # Exponential backoff before retry
                     await asyncio.sleep(RETRY_DELAY * (2 ** attempt))
-                    
                 else:
-                    logger.error(f"[Batch Worker] RuntimeError: {e}")
+                    logger.error(f"{prefix} Error: {e}")
                     return
             except Exception as e:
-                logger.error(f"[Batch Worker] Unexpected error: {e}", exc_info=True)
+                logger.error(f"{prefix} Unexpected error: {e}")
                 return
 
 
@@ -341,24 +370,35 @@ async def main():
     # ── 4. Backfill existing rows with missing contacts ──────────
     await backfill_missing_contacts(sheets_manager, sheet_lock, semaphore, loop)
 
-    # ── 5. Load CSV ──────────────────────────────────────────────
+    # ── 5. Load CSV & Cleanup ────────────────────────────────────
     urls_to_process = []
+    all_csv_urls = []
+    header = None
     try:
         with open(COMPANY_URL_FILE, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            next(reader, None)
+            header = next(reader, None)
             for row in reader:
                 if row and row[0].strip():
                     u = row[0].strip()
+                    all_csv_urls.append(u)
                     if normalize_url(u) not in existing_linkedin_urls:
                         urls_to_process.append(u)
                     else:
-                        logger.info(f"[CSV] SKIP (already in sheet): {u}")
+                        logger.info(f"[CSV] SKIP (already in sheet): {u[:30]}...")
+        
+        # Cleanup CSV on startup
+        if len(urls_to_process) != len(all_csv_urls):
+            logger.info(f"[Init] Cleaning CSV: removing {len(all_csv_urls) - len(urls_to_process)} already-processed URLs.")
+            with open(COMPANY_URL_FILE, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                if header: writer.writerow(header)
+                for u in urls_to_process:
+                    writer.writerow([u])
+
     except Exception as e:
         logger.error(f"Failed to read {COMPANY_URL_FILE}: {e}")
         return
-
-    logger.info(f"[CSV] {len(urls_to_process)} new URL(s) to process.")
 
     if not urls_to_process:
         logger.info("Nothing new to process. Done.")
@@ -366,21 +406,23 @@ async def main():
 
     # ── 6. Batch URLs and process concurrently ──────────────────
     key_index_ref = [0]   # shared mutable reference for Apify key rotation
+    csv_lock = asyncio.Lock()
 
     # Group URLs into batches
     url_batches = [urls_to_process[i:i + BATCH_SIZE] for i in range(0, len(urls_to_process), BATCH_SIZE)]
-    logger.info(f"[Main] Total URLs: {len(urls_to_process)}")
-    logger.info(f"[Main] Created {len(url_batches)} batches of max {BATCH_SIZE} URLs each")
-    logger.info(f"[Main] Concurrency: {CONCURRENCY}, Max retries: {MAX_RETRIES}")
+    total_batches = len(url_batches)
+    
+    logger.info(f"[Main] Processing {len(urls_to_process)} URLs in {total_batches} batches.")
 
     # Process batches with progress tracking
     tasks = [
         process_url_batch(
-            batch, apify_keys, key_index_ref,
+            idx + 1, total_batches, batch, 
+            apify_keys, key_index_ref,
             existing_linkedin_urls, sheets_manager,
-            semaphore, sheet_lock, loop,
+            semaphore, sheet_lock, csv_lock, loop,
         )
-        for batch in url_batches
+        for idx, batch in enumerate(url_batches)
     ]
 
     await asyncio.gather(*tasks)
