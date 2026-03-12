@@ -1,0 +1,143 @@
+context : company services 
+
+---
+google sheet url for apify keys -> APIFY SHEET
+url = https://docs.google.com/spreadsheets/d/1uRxPzWt5JH7gb5Kz0mqM4oCeink6h73tjF3_q641bI8/edit?gid=0#gid=0
+you can use credentials.json to access it 
+
+
+google sheet url to store data -> Outreach Sheet
+url = https://docs.google.com/spreadsheets/d/1UfXT9v3Tw8TAco-MFZSXQQwXOYxCrbGQCgp4QFkhTZA/edit?gid=0#gid=0
+cols : company_name	website	linkedin_company	industry	company_size	location	description	scraped_at	emails	phones	company_keywords	pain_points	status	email_sent_at
+first check for one time cols ok
+
+
+---
+Apify Actors 
+
+1. Linkedin search scraper 
+actor -> https://console.apify.com/actors/M2FMdjRVeF1HPGFcc
+
+description:
+it is working like that :
+    - it will search through the keywords like : Founders and CEO and CTO to extract company details 
+    - from the company linkedin url we ll go through the second scrape inorders to extract details of the company 
+    
+
+2. Company Details scraper 
+actor -> https://console.apify.com/actors/od6RadQV98FOARtrp
+
+description :
+to scrap company details like :
+    - like : name, url, tagline, description, industry, websiteUrl, city, country
+    from here :
+    [
+        {
+            "urn": "urn:li:fsd_company:2058137",
+            "url": "https://linkedin.com/company/electronic-technology-systems/",
+            "name": "Electronic Technology Systems",
+            "tagline": null,
+            "description": "Electronic Technology Systems (ETS) is headquartered in Bangalore. Founded in 1987 by a group of Technology enthusiasts with extensive R & D experience in IT & Telecommunication industry and backed by a team of young Marketing experts.\r\n\r\nETS, leading supplier of Voice Recording & Monitoring solutions in India is an exclusive Indian distributor of VoiceCyber Technologies Ltd., Hong Kong to promote and support VoiceCyber feature rich multimedia Interaction Recording suite in Indian Market. \r\n\r\nVoiceCyber products and solutions are trusted and proven, reliable and resilient for over a decade. It offers an intelligent, flexible PCI DSS compliant recording solution and provides the capability to capture, store & tag, multiple interactions including voice, text and screen. It is certified by Avaya, Cisco, Alcatel, NEC , Siemens and many more for its compliance and compatibility. It supports wide range of PBX types such as digital, analog, TDM or VoIP, hybrid telephony environments, individually or blended on a single platform. It has over 500 worldwide satisfied customers.\r\n\r\nVoiceCyber WFO advance Suite such as VCLog Screen Logger, Quality Monitoring, Integrated Management Platform, Unified Platform Management &  more, will provide value added capabilities which will optimize operational efficiency of contact centers, financial institutions, public safety and other vertical markets.\r\n\r\nOpenSpan Platform: Application Integration & Automation Software solution to quickly & easily integrate & automate multiple applications and create seamless & highly efficient single desktops without writing a code or code modifications.\r\n\r\nETS Vision:\r\n-Our vision is to continue providing most innovative, cost-effective cutting edge technology & solutions that exceed our customer’s expectations.\r\n- Maintain the highest levels of business ethics & professional standards.\r\n- Close understanding of customers & their business needs & empower them with expertise to achieve excellence.",
+            "industry": [
+            "Information Technology & Services"
+            ],
+            "websiteUrl": "http://www.ets-india.com",
+            "headquarter": {
+            "description": null,
+            "country": "IN",
+            "city": "Bangalore",
+            "postalCode": "560001"
+            },
+            "hashtag": [],
+            "foundedOn": {
+            "month": null,
+            "year": 1987,
+            "day": null
+            },
+            "employeeCount": 1,
+            "followerCount": 53
+        }
+    ]
+
+after that store that leads according to the Outreach sheet data cols
+after that lauch email extractor and scrap email and phone number as list of strings and store it into sheet
+
+
+1. linkedin search scraper code
+    from apify_client import ApifyClient
+
+    # Initialize the ApifyClient with your API token
+    client = ApifyClient("<YOUR_API_TOKEN>")
+
+    # Prepare the Actor input
+    run_input = {
+        "profileScraperMode": "Full",
+        "searchQuery": None,
+        "maxItems": 20,
+        "locations": None,
+        "currentCompanies": None,
+        "pastCompanies": None,
+        "schools": None,
+        "currentJobTitles": None,
+        "pastJobTitles": None,
+        "yearsOfExperienceIds": None,
+        "yearsAtCurrentCompanyIds": None,
+        "seniorityLevelIds": None,
+        "functionIds": None,
+        "industryIds": None,
+        "firstNames": None,
+        "lastNames": None,
+        "profileLanguages": None,
+        "companyHeadcount": None,
+        "companyHeadquarterLocations": None,
+        "recentlyChangedJobs": None,
+        "excludeLocations": None,
+        "excludeCurrentCompanies": None,
+        "excludePastCompanies": None,
+        "excludeSchools": None,
+        "excludeCurrentJobTitles": None,
+        "excludePastJobTitles": None,
+        "excludeIndustryIds": None,
+        "excludeSeniorityLevelIds": None,
+        "excludeFunctionIds": None,
+        "excludeCompanyHeadquarterLocations": None,
+        "startPage": 1,
+        "takePages": None,
+        "autoQuerySegmentation": None,
+        "autoQuerySegmentationLevels": None,
+        "autoQuerySegmentationTargetCountries": None,
+        "profileDeduplicationMode": None,
+        "mongoDbConnectionString": None,
+        "postFilteringMongoDbQuery": None,
+        "postFilteringMongoDbAggregation": None,
+    }
+
+    # Run the Actor and wait for it to finish
+    run = client.actor("M2FMdjRVeF1HPGFcc").call(run_input=run_input)
+
+    # Fetch and print Actor results from the run's dataset (if there are any)
+    for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        print(item)
+
+2. company detail scraper 
+    from apify_client import ApifyClient
+
+    # Initialize the ApifyClient with your API token
+    client = ApifyClient("<YOUR_API_TOKEN>")
+
+    # Prepare the Actor input
+    run_input = {
+        "action": "get-profiles",
+        "keywords": ["web dev"],
+        "isUrl": False,
+        "isName": False,
+        "limit": 1,
+        "location": None,
+    }
+
+    # Run the Actor and wait for it to finish
+    run = client.actor("od6RadQV98FOARtrp").call(run_input=run_input)
+
+    # Fetch and print Actor results from the run's dataset (if there are any)
+    for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        print(item)

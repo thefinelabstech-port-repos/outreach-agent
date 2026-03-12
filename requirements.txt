@@ -1,0 +1,9 @@
+requests
+beautifulsoup4
+playwright
+fastapi
+uvicorn
+gspread
+google-auth
+pydantic
+apify-client
