@@ -14,5 +14,5 @@ ENV/
 
 # Credentials and Environment
 .env
-credentials.json
+data/credentials.json
 .vscode/

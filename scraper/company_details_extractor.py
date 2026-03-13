@@ -6,8 +6,8 @@ import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from apify_client import ApifyClient
-from sheets import SheetsManager
-from email_extractor import extract_contact_info
+from core.sheets import SheetsManager
+from scraper.email_extractor import extract_contact_info
 
 # Configure Logging
 logging.basicConfig(
@@ -18,10 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger("Outreach")
 
 # Constants
-CREDENTIALS_FILE = "credentials.json"
+CREDENTIALS_FILE = "data/credentials.json"
 SETTINGS_SHEET_URL = "https://docs.google.com/spreadsheets/d/1uRxPzWt5JH7gb5Kz0mqM4oCeink6h73tjF3_q641bI8/edit?gid=0#gid=0"
 OUTREACH_SHEET_URL = "https://docs.google.com/spreadsheets/d/1UfXT9v3Tw8TAco-MFZSXQQwXOYxCrbGQCgp4QFkhTZA/edit?gid=0#gid=0"
-COMPANY_URL_FILE = "company_url.csv"
+COMPANY_URL_FILE = "data/company_url.csv"
 ACTOR_ID = "od6RadQV98FOARtrp"
 CONCURRENCY = 2   # Reduced to 2 for better stability with large datasets (30k+ URLs)
 BATCH_SIZE = 5

@@ -1,0 +1,14 @@
+Hi there,
+
+I came across {{company_name}} and was impressed by what you're building in the {{industry}} space.
+
+I wanted to reach out because we help companies like yours [value proposition here].
+
+Would you be open to a quick 15-minute call this week to explore if there's a fit?
+
+Looking forward to hearing from you.
+
+Best,
+[Your Name]
+[Your Title]
+[Your Company]
